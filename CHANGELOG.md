@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.63.0](https://github.com/rynfar/meridian/compare/meridian-v1.62.7...meridian-v1.63.0) (2026-08-21)
+
+
+### Features
+
+* report build provenance and available updates on /health ([#866](https://github.com/rynfar/meridian/issues/866)) ([992f81c](https://github.com/rynfar/meridian/commit/992f81cfed4b17894f09068718705fbd5a937000))
+
 ## [1.62.7](https://github.com/rynfar/meridian/compare/meridian-v1.62.6...meridian-v1.62.7) (2026-08-20)
 
 
