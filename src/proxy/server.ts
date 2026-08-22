@@ -98,7 +98,7 @@ import { unstreamedAssistantBlockFrames } from "./unstreamedAssistant"
 import { extractAdvisorModel, extractSystemText, getLastUserMessage, stripAdvisorTools, stripNonStandardStreamFields, MULTIMODAL_TYPES, buildToolUseIndex, frameReplayTurns } from "./messages"
 import { requireAuth, authEnabled } from "./auth"
 import { detectAdapter } from "./adapters/detect"
-import { buildQueryOptions, resolveQueryConfigDir, singleTurnCapLiftRaisesBudget, type QueryContext } from "./query"
+import { buildQueryOptions, resolveQueryConfigDir, singleTurnCapLiftRaisesBudget, type QueryContext, type ReplayDegradationReason } from "./query"
 import { normalizeEffort } from "./effort"
 import { parseOutputFormat, structuredOutputText } from "./structuredOutput"
 import { runTransformHook, buildPipeline, createRequestContext } from "./transform"
@@ -2707,6 +2707,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
             : pipelineCtx.passthrough !== undefined
               ? pipelineCtx.passthrough
               : envBool("PASSTHROUGH")
+        let replayDegradationReason: ReplayDegradationReason | undefined
         if (
           advancesDurableCheckpoint &&
           lineageResult.type !== "continuation" &&
@@ -2831,6 +2832,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
           lineageResult.type === "diverged" &&
           lineageResult.reason === "modified-history"
         ) {
+          replayDegradationReason = "concurrent-modified-history"
           claudeLog("session.concurrent_conflict", {
             reason: "downgraded=fresh-replay",
             sessionQueueWaitMs: requestMeta.sessionQueueWaitMs,
@@ -3080,6 +3082,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
         } else {
           // Partial, late, duplicate, or unknown results get one safe fresh
           // replay rather than an invalid SDK resume.
+          replayDegradationReason = "checkpoint-incomplete"
           claudeLog("passthrough.checkpoint_replay", {
             expectedToolIds: passthroughToolCallIds?.length ?? 0,
             reason: "incomplete_or_mismatched_results",
@@ -3926,6 +3929,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                       : undefined,
                     advisorModel,
+                    replayDegradationReason,
                   }, requestAbort.controller)
                   attemptMaxTurns = attemptQuery.options.maxTurns
                   for await (const event of runSdkQueryAttempt(attemptQuery, requestAbort.controller.signal, requestMeta, "non_stream", managedSdkAttemptLocators())) {
@@ -4032,6 +4036,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
+                      replayDegradationReason,
                     }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
                     return
                   }
@@ -4093,6 +4098,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
+                      replayDegradationReason,
                     }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "non_stream_fresh", managedSdkAttemptLocators())
                     return
                   }
@@ -5115,6 +5121,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                         ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                         : undefined,
                       advisorModel,
+                      replayDegradationReason,
                     }, requestAbort.controller)
                     attemptMaxTurns = attemptQuery.options.maxTurns
                     lastAttemptMaxTurns = attemptMaxTurns
@@ -5201,6 +5208,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
+                        replayDegradationReason,
                       }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
                       return
                     }
@@ -5258,6 +5266,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                           ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                           : undefined,
                         advisorModel,
+                        replayDegradationReason,
                       }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "stream_fresh", managedSdkAttemptLocators())
                       return
                     }
@@ -6185,6 +6194,7 @@ export function createProxyServer(config: Partial<ProxyConfig> = {}): ProxyServe
                       ? sdkFeatures.additionalDirectories.split(",").map(d => d.trim()).filter(Boolean)
                       : undefined,
                     advisorModel,
+                    replayDegradationReason,
                   }, requestAbort.controller), requestAbort.controller.signal, requestMeta, "silent_recovery", [
                     recoveryForkSource,
                     recoveryForkTarget,
