@@ -1,4 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test"
+import { afterEach, beforeEach, describe, expect, it } from "bun:test"
+import { installSdkMock } from "./sdkMock"
+import { installLoggerMock } from "./loggerMock"
+import { installMcpToolsMock } from "./mcpToolsMock"
 import {
   assistantMessage,
   messageStart,
@@ -7,6 +10,7 @@ import {
   blockStop,
   messageDelta,
   messageStop,
+  resolveMockSdkSessionId,
 } from "./helpers"
 
 interface AttemptControl {
@@ -18,7 +22,7 @@ let activeQueries = 0
 let maxActiveQueries = 0
 let queryCalls = 0
 let controls: AttemptControl[] = []
-let capturedParams: Array<{ options?: { resume?: string } }> = []
+let capturedParams: Array<{ options?: { resume?: string; sessionId?: string; forkSession?: boolean } }> = []
 
 function deferredAttempt(): AttemptControl & { wait: Promise<void>; markStarted: () => void } {
   let release = () => {}
@@ -28,13 +32,14 @@ function deferredAttempt(): AttemptControl & { wait: Promise<void>; markStarted:
   return { release, started, wait, markStarted }
 }
 
-mock.module("@anthropic-ai/claude-agent-sdk", () => ({
-  query: (params: { options?: { resume?: string } }) => {
+installSdkMock(() => ({
+  query: (params: { options?: { resume?: string; sessionId?: string; forkSession?: boolean } }) => {
     capturedParams.push(params)
     queryCalls++
     const control = deferredAttempt()
     controls.push(control)
-    const sessionId = `sdk-downgrade-${queryCalls}`
+    // Upstream's managed-fork guard rejects a session id the proxy did not ask for.
+    const sessionId = resolveMockSdkSessionId(params.options, `sdk-downgrade-${queryCalls}`)
     const generator = (async function* () {
       activeQueries++
       maxActiveQueries = Math.max(maxActiveQueries, activeQueries)
@@ -48,6 +53,9 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
         yield { ...messageDelta("end_turn"), session_id: sessionId }
         yield { ...messageStop(), session_id: sessionId }
         yield { ...assistantMessage([{ type: "text", text: "ok" }]), session_id: sessionId }
+        // A real query terminates with a result, and that boundary is the only
+        // persistence acknowledgement the durable session store accepts.
+        yield { type: "result", subtype: "success", is_error: false, session_id: sessionId }
       } finally {
         activeQueries--
       }
@@ -58,12 +66,12 @@ mock.module("@anthropic-ai/claude-agent-sdk", () => ({
   tool: () => ({}),
 }))
 
-mock.module("../logger", () => ({
+installLoggerMock(() => ({
   claudeLog: () => {},
   withClaudeLogContext: (_ctx: unknown, fn: () => unknown) => fn(),
 }))
 
-mock.module("../mcpTools", () => ({
+installMcpToolsMock(() => ({
   createOpencodeMcpServer: () => ({ type: "sdk", name: "opencode", instance: {} }),
 }))
 
@@ -181,7 +189,7 @@ describe("modified-history conflict downgrade", () => {
     expect((await firstP).status).toBe(200)
     const second = await secondP
     expect(second.status).toBe(400)
-    const body = await second.json()
+    const body = await second.json() as { error: { type: string; message: string } }
     expect(body.error.type).toBe("invalid_request_error")
     expect(body.error.message).toContain("session advanced")
     // Only one SDK query — the second request is refused
