@@ -973,6 +973,82 @@ describe("verifyLineage rejects raw dropped blocks without adapter canonicalizat
   })
 })
 
+describe("verifyLineage volatile trailing-block truncation", () => {
+  const toolResult = (id: string, content: string) => ({
+    type: "tool_result",
+    tool_use_id: id,
+    content,
+  })
+  const board = { type: "text", text: "<system-reminder>### Background Job Board</system-reminder>" }
+
+  function sessionFor(messages: Array<{ role: string; content: any }>): SessionState {
+    return makeSession({
+      lastAccess: 0,
+      lineageHash: computeLineageHash(messages),
+      messageCount: messages.length,
+      messageHashes: computeMessageHashes(messages),
+      messageBlockHashes: computeMessageBlockHashes(messages),
+    })
+  }
+
+  /** stored: the request whose trailing turn carried the sliding status board. */
+  const stored = [
+    { role: "user", content: [{ type: "text", text: "start" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "call-a", name: "bash", input: { command: "a" } }] },
+    { role: "user", content: [toolResult("call-a", "a-result"), board] },
+  ]
+
+  it("continues when the boundary turn sheds its trailing status block", () => {
+    const incoming = [
+      stored[0]!,
+      stored[1]!,
+      { role: "user", content: [toolResult("call-a", "a-result")] },
+      { role: "assistant", content: [{ type: "tool_use", id: "call-b", name: "bash", input: { command: "b" } }] },
+      { role: "user", content: [toolResult("call-b", "b-result"), board] },
+    ]
+
+    expect(verifyLineage(sessionFor(stored), incoming)).toEqual({
+      type: "continuation",
+      session: sessionFor(stored),
+      resumeFrom: 3,
+    })
+  })
+
+  it("still diverges when a retained block changed rather than being shed", () => {
+    const incoming = [
+      stored[0]!,
+      stored[1]!,
+      { role: "user", content: [toolResult("call-a", "revised-result")] },
+      { role: "assistant", content: "next" },
+    ]
+
+    expect(verifyLineage(sessionFor(stored), incoming).type).toBe("diverged")
+  })
+
+  it("still diverges when the boundary turn is emptied entirely", () => {
+    const incoming = [
+      stored[0]!,
+      stored[1]!,
+      { role: "user", content: [] },
+      { role: "assistant", content: "next" },
+    ]
+
+    expect(verifyLineage(sessionFor(stored), incoming).type).toBe("diverged")
+  })
+
+  it("leaves a non-growing history on the undo path", () => {
+    // Blocks shed with no new turn is a rollback, not a slid status block —
+    // the branch must not claim it and steal the undo fork point.
+    const incoming = [
+      stored[0]!,
+      stored[1]!,
+      { role: "user", content: [toolResult("call-a", "a-result")] },
+    ]
+
+    expect(verifyLineage(sessionFor(stored), incoming).type).toBe("undo")
+  })
+})
+
 describe("normalizeContextUsage", () => {
   it("returns the last iteration when iterations are present", () => {
     const result = normalizeContextUsage({

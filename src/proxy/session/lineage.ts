@@ -706,6 +706,31 @@ export function verifyLineage(
           resumeContentFrom: storedBlocks.length,
         }
       }
+
+      // Volatile trailing blocks: the mirror image of the append case above.
+      // Harness plugins attach a per-request status block (a background-job
+      // board, a reminder) to whichever user turn is currently last, then move
+      // it to the new last turn on the following request. The turn Meridian
+      // stored therefore SHEDS its final block(s) while the history grows —
+      // stored [tool_result, status] arrives as [tool_result].
+      //
+      // The retained blocks must still be an exact prefix of the stored ones,
+      // so nothing already sent was rewritten: the SDK session holds strictly
+      // more of that one turn than the client now claims, and the surplus is
+      // context the model already read. Resume normally from the stored count.
+      //
+      // Narrow on purpose. Only the boundary turn, only a user turn, only when
+      // the history grows, and only when the survivors match block for block —
+      // a changed block still diverges, preserving #689/#692.
+      const shedsTrailingBlocks =
+        messages.length > cached.messageCount &&
+        incomingBlocks.length === incomingBoundary.content.length &&
+        incomingBlockHashes.length > 0 &&
+        incomingBlockHashes.length < storedBlocks.length &&
+        incomingBlockHashes.every((hash, index) => storedBlocks[index] === hash)
+      if (shedsTrailingBlocks) {
+        return { type: "continuation", session: cached, resumeFrom: cached.messageCount }
+      }
     }
   }
 
