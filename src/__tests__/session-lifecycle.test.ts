@@ -407,6 +407,42 @@ describe("session transcript lifecycle", () => {
     expect(readSidecar(storeDir).resources[key]?.state).toBe("live")
   })
 
+  async function reconcileAgainstPins(
+    sessionId: string,
+    pinsFor: (exact: TranscriptLocator) => TranscriptLocator[],
+  ): Promise<{ resourcesPinned: number, state?: string }> {
+    const isolated = { ...options, storeDir: join(storeDir, sessionId) }
+    const exact = await prepareFork(locator(sessionId), isolated)
+    const { resourcesPinned } = await reconcile(pinsFor(exact), isolated)
+    const resources = readSidecar(isolated.storeDir).resources
+    return { resourcesPinned, state: resources[getTranscriptResourceKey(exact)]?.state }
+  }
+
+  it("pins every generation of a key for a pin that carries no generation", async () => {
+    expect(await reconcileAgainstPins("wildcard-pin", (exact) => [withoutLifecycleGeneration(exact)]))
+      .toEqual({ resourcesPinned: 1, state: "live" })
+  })
+
+  it("does not pin a resource whose generation the pin does not name", async () => {
+    expect(await reconcileAgainstPins("stale-generation-pin",
+      (exact) => [{ ...exact, lifecycleGeneration: "r:superseded:1" }]))
+      .toEqual({ resourcesPinned: 0, state: "retired" })
+  })
+
+  it.each(["before", "after"] as const)(
+    "considers a matching pin listed %s another pin sharing its key",
+    async (position) => {
+      expect(await reconcileAgainstPins(`duplicate-key-pins-matching-${position}`, (exact) => {
+        const superseded = { ...exact, lifecycleGeneration: "r:superseded:1" }
+        return position === "before" ? [exact, superseded] : [superseded, exact]
+      })).toEqual({ resourcesPinned: 1, state: "live" })
+    })
+
+  it("pins nothing when the caller provides no pins", async () => {
+    expect(await reconcileAgainstPins("unpinned", () => []))
+      .toEqual({ resourcesPinned: 0, state: "retired" })
+  })
+
   it("blocks cross-process deletion while a durable writer lease is active", async () => {
     const fork = locator("durably-active-writer")
     await prepareFork(fork, options)
@@ -877,6 +913,12 @@ function locator(sessionId: string, profile = "profile"): TranscriptLocator {
     configDir: join(tmpdir(), profile),
     projectDir: join(tmpdir(), "project"),
   }
+}
+
+function withoutLifecycleGeneration(
+  { lifecycleGeneration: _generation, ...physical }: TranscriptLocator,
+): TranscriptLocator {
+  return physical
 }
 
 function readSidecar(storeDir: string): StoredSidecar {

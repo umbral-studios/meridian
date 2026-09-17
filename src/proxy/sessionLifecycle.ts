@@ -592,9 +592,7 @@ export async function reconcile(
   return withSidecarLock(options, async (paths) => {
     const effectivePins = (options.pinProvider?.() ?? pins).map(canonicalizeTranscriptLocator)
     const sidecar = await readSidecar(paths.sidecar)
-    const pinKeys = new Set(Object.values(sidecar.resources)
-      .filter((resource) => resourceIsPinned(resource, effectivePins))
-      .map((resource) => resource.key))
+    const pinnedGenerations = indexPinsByResourceKey(effectivePins)
     const result: ReconcileResult = {
       preparedRetired: 0,
       liveRetired: 0,
@@ -655,7 +653,7 @@ export async function reconcile(
     // Rescue durable pins first. This releases pending capacity before any
     // unpinned live resource tries to enter the bounded retirement backlog.
     for (const resource of Object.values(sidecar.resources)) {
-      if (!pinKeys.has(resource.key)) continue
+      if (!resourceIsPinned(resource, pinnedGenerations)) continue
       result.resourcesPinned++
       if (resource.state === "deleted") {
         throw new SessionLifecycleError(`pinned transcript ${resource.key} was already deleted`)
@@ -672,7 +670,7 @@ export async function reconcile(
     }
 
     for (const resource of Object.values(sidecar.resources)) {
-      if (pinKeys.has(resource.key) || hasActiveTranscriptLease(resource)) continue
+      if (resourceIsPinned(resource, pinnedGenerations) || hasActiveTranscriptLease(resource)) continue
       if (resource.state === "prepared" && resource.updatedAt <= preparedCutoff) {
         // prepared and retired both consume one pending slot.
         resource.state = "retired"
@@ -771,7 +769,9 @@ async function claimDeletion(
 ): Promise<TranscriptResource | undefined> {
   return withSidecarLock(options, async (paths) => {
     const sidecar = await readSidecar(paths.sidecar)
-    const finalPins = (options.pinProvider?.() ?? pins).map(canonicalizeTranscriptLocator)
+    const pinnedGenerations = indexPinsByResourceKey(
+      (options.pinProvider?.() ?? pins).map(canonicalizeTranscriptLocator),
+    )
     const now = nowMs(options)
     const unarmedLeaseTtlMs = nonNegativeOption(options.unarmedLeaseTtlMs, DEFAULT_UNARMED_LEASE_TTL_MS, "unarmedLeaseTtlMs")
     let leasesChanged = false
@@ -781,7 +781,7 @@ async function claimDeletion(
     const candidate = Object.values(sidecar.resources)
       .filter((resource) =>
         resource.state === "retired"
-        && !resourceIsPinned(resource, finalPins)
+        && !resourceIsPinned(resource, pinnedGenerations)
         && !hasActiveTranscriptLease(resource)
         && (resource.nextAttemptAt ?? 0) <= now)
       .sort((left, right) => left.updatedAt - right.updatedAt || left.key.localeCompare(right.key))[0]
@@ -864,9 +864,10 @@ async function countDeferred(
 ): Promise<number> {
   return withSidecarLock(options, async (paths) => {
     const sidecar = await readSidecar(paths.sidecar)
+    const pinnedGenerations = indexPinsByResourceKey(pins)
     return Object.values(sidecar.resources).filter((resource) =>
       (resource.state === "retired" || resource.state === "deleting")
-      && !resourceIsPinned(resource, pins)).length
+      && !resourceIsPinned(resource, pinnedGenerations)).length
   })
 }
 
@@ -1652,15 +1653,30 @@ function assertResourceCapacity(
   }
 }
 
+/** A pin without a generation is a wildcard over every generation of its key. */
+type PinnedGenerationsByKey = ReadonlyMap<string, ReadonlySet<string | undefined>>
+
+/** Hash every pin once, so matching a whole store against it stays linear. */
+function indexPinsByResourceKey(pins: readonly TranscriptLocator[]): PinnedGenerationsByKey {
+  const pinnedGenerations = new Map<string, Set<string | undefined>>()
+  for (const pin of pins) {
+    const key = getTranscriptResourceKey(pin)
+    const generations = pinnedGenerations.get(key)
+    if (generations) generations.add(pin.lifecycleGeneration)
+    else pinnedGenerations.set(key, new Set([pin.lifecycleGeneration]))
+  }
+  return pinnedGenerations
+}
+
 function resourceIsPinned(
   resource: TranscriptResource,
-  pins: readonly TranscriptLocator[],
+  pinnedGenerations: PinnedGenerationsByKey,
 ): boolean {
-  return pins.some((pin) =>
-    getTranscriptResourceKey(pin) === resource.key
-    // Legacy mappings conservatively pin the physical locator until their
-    // first exact-CAS lifecycle attachment stores a generation.
-    && (pin.lifecycleGeneration === undefined || pin.lifecycleGeneration === resource.generation))
+  const generations = pinnedGenerations.get(resource.key)
+  if (!generations) return false
+  // Legacy mappings conservatively pin the physical locator until their
+  // first exact-CAS lifecycle attachment stores a generation.
+  return generations.has(undefined) || generations.has(resource.generation)
 }
 
 function hasActiveTranscriptLease(resource: TranscriptResource): boolean {
