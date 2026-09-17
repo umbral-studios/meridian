@@ -1172,6 +1172,99 @@ async function publishInitializedSidecarLock(path: string, contents: string): Pr
   }
 }
 
+interface QueuedLockAcquirer {
+  state: "waiting" | "granted" | "abandoned"
+  grant: () => void
+}
+
+interface ProcessLockQueue {
+  held: boolean
+  readonly waiting: QueuedLockAcquirer[]
+}
+
+/** The hard-link lock file remains the cross-process gate; this queue only
+ *  orders acquirers inside one process, which the unfair retry poll starves:
+ *  a turn holding the lock barges its own next acquisition ahead of waiters. */
+const processLockQueues = new Map<string, ProcessLockQueue>()
+
+async function enterProcessLockQueue(lockPath: string, deadline: number): Promise<void> {
+  const queue = processLockQueues.get(lockPath) ?? { held: false, waiting: [] }
+  processLockQueues.set(lockPath, queue)
+  if (!queue.held) {
+    queue.held = true
+    return
+  }
+
+  const acquirer: QueuedLockAcquirer = { state: "waiting", grant: () => {} }
+  const granted = new Promise<"granted">((resolve) => {
+    acquirer.grant = () => resolve("granted")
+  })
+  queue.waiting.push(acquirer)
+  let expiry: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<"expired">((resolve) => {
+    expiry = setTimeout(() => resolve("expired"), Math.max(0, deadline - Date.now()))
+  })
+  const outcome = await Promise.race([granted, expired])
+  clearTimeout(expiry)
+  if (outcome === "granted") return
+
+  // A grant that lost the race by a hair still made this acquirer the holder.
+  if (acquirer.state === "granted") handOffProcessLockQueue(lockPath)
+  else acquirer.state = "abandoned"
+  throw new SessionLifecycleLockError(`timed out waiting for ${lockPath}`)
+}
+
+function handOffProcessLockQueue(lockPath: string): void {
+  const queue = processLockQueues.get(lockPath)
+  if (!queue) return
+  for (;;) {
+    const next = queue.waiting.shift()
+    if (!next) {
+      queue.held = false
+      processLockQueues.delete(lockPath)
+      return
+    }
+    if (next.state !== "waiting") continue
+    next.state = "granted"
+    next.grant()
+    return
+  }
+}
+
+interface SidecarLockFileClaim {
+  readonly lockPath: string
+  readonly token: string
+  readonly deadline: number
+  readonly retryMs: number
+  readonly staleMs: number
+}
+
+async function claimSidecarLockFile(claim: SidecarLockFileClaim): Promise<void> {
+  for (;;) {
+    const acquired = await publishInitializedSidecarLock(claim.lockPath, `${claim.token}
+${Date.now()}
+`)
+    if (acquired) return
+    await recoverStaleLock(claim.lockPath, claim.staleMs)
+    if (Date.now() >= claim.deadline) {
+      throw new SessionLifecycleLockError(`timed out waiting for ${claim.lockPath}`)
+    }
+    await delay(Math.min(claim.retryMs, Math.max(1, claim.deadline - Date.now())))
+  }
+}
+
+async function releaseSidecarLockFile(lockPath: string, token: string): Promise<void> {
+  // Only the owner may release. A stale-lock recovery must not unlink a successor.
+  try {
+    const contents = await readFile(lockPath, "utf8")
+    if (contents.startsWith(`${token}\n`)) await unlink(lockPath)
+  } catch (error) {
+    if (!hasCode(error, "ENOENT")) {
+      console.error("[sessionLifecycle] lock release failed:", errorMessage(error))
+    }
+  }
+}
+
 async function withSidecarLock<T>(
   options: SessionLifecycleOptions,
   operation: (paths: SidecarPaths) => Promise<T>,
@@ -1186,32 +1279,17 @@ async function withSidecarLock<T>(
   const deadline = Date.now() + nonNegativeOption(options.lockWaitMs, DEFAULT_LOCK_WAIT_MS, "lockWaitMs")
   const retryMs = option(options.lockRetryMs, DEFAULT_LOCK_RETRY_MS, "lockRetryMs")
   const staleMs = option(options.lockStaleMs, DEFAULT_LOCK_STALE_MS, "lockStaleMs")
-  let acquired = false
 
-  while (!acquired) {
-    acquired = await publishInitializedSidecarLock(paths.lock, `${token}
-${Date.now()}
-`)
-    if (acquired) break
-    await recoverStaleLock(paths.lock, staleMs)
-    if (Date.now() >= deadline) {
-      throw new SessionLifecycleLockError(`timed out waiting for ${paths.lock}`)
-    }
-    await delay(Math.min(retryMs, Math.max(1, deadline - Date.now())))
-  }
-
+  await enterProcessLockQueue(paths.lock, deadline)
   try {
-    return await operation(paths)
-  } finally {
-    // Only the owner may release. A stale-lock recovery must not unlink a successor.
+    await claimSidecarLockFile({ lockPath: paths.lock, token, deadline, retryMs, staleMs })
     try {
-      const contents = await readFile(paths.lock, "utf8")
-      if (contents.startsWith(`${token}\n`)) await unlink(paths.lock)
-    } catch (error) {
-      if (!hasCode(error, "ENOENT")) {
-        console.error("[sessionLifecycle] lock release failed:", errorMessage(error))
-      }
+      return await operation(paths)
+    } finally {
+      await releaseSidecarLockFile(paths.lock, token)
     }
+  } finally {
+    handOffProcessLockQueue(paths.lock)
   }
 }
 

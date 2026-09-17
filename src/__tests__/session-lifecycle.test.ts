@@ -90,6 +90,29 @@ describe("session transcript lifecycle", () => {
     rmSync(storeDir, { recursive: true, force: true })
   })
 
+  /** Stretch the first `commits` sidecar commits so concurrent acquirers pile
+   *  up behind a lock hold long enough to observe the order they are served. */
+  async function withSlowSidecarCommits(
+    { holdMs, commits }: { holdMs: number, commits: number },
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const sync = durableFileSystem.syncDirectoryDurably
+    let slowed = 0
+    const syncSpy = spyOn(durableFileSystem, "syncDirectoryDurably").mockImplementation(async path => {
+      if (path === storeDir && slowed < commits) {
+        slowed++
+        await pause(holdMs)
+      }
+      await sync(path)
+    })
+    try {
+      await operation()
+      expect(slowed).toBe(commits)
+    } finally {
+      syncSpy.mockRestore()
+    }
+  }
+
   async function withSlowRecoverySync(operation: () => Promise<void>): Promise<void> {
     const sync = durableFileSystem.syncDirectoryDurably
     let delayed = 0
@@ -799,6 +822,80 @@ describe("session transcript lifecycle", () => {
     })).rejects.toBeInstanceOf(SessionLifecycleLockError)
     expect(readdirSync(storeDir)).not.toContain("session-gc.json")
   })
+
+  it("keeps waiting for a lock file another process holds, then proceeds once it is gone", async () => {
+    const lock = join(storeDir, "session-gc.json.lock")
+    writeFileSync(lock, "another-owner\n", { mode: 0o600 })
+    const target = locator("external-holder")
+
+    const pending = prepareFork(target, { ...options, lockWaitMs: 2_000, lockRetryMs: 5 })
+    await pause(60)
+    expect(readdirSync(storeDir)).not.toContain("session-gc.json")
+
+    rmSync(lock, { force: true })
+    await pending
+    expect(readSidecar(storeDir).resources[getTranscriptResourceKey(target)]).toBeDefined()
+  })
+
+  it("grants same-process acquisitions in arrival order", async () => {
+    const arrivals = ["first", "second", "third", "fourth"]
+    const completions: string[] = []
+
+    await withSlowSidecarCommits({ holdMs: 60, commits: arrivals.length }, async () => {
+      const turns: Promise<unknown>[] = []
+      for (const name of arrivals) {
+        turns.push(prepareFork(locator(name), options).then(() => completions.push(name)))
+        await pause(5)
+      }
+      await Promise.all(turns)
+    })
+
+    expect(completions).toEqual(arrivals)
+  })
+
+  it("charges the lock budget for the in-process queue wait, then serves the waiters behind a casualty", async () => {
+    await withSlowSidecarCommits({ holdMs: 300, commits: 1 }, async () => {
+      const holder = prepareFork(locator("holder"), options)
+      await pause(5)
+      const impatient = prepareFork(locator("impatient"), { ...options, lockWaitMs: 40 })
+      const patient = prepareFork(locator("patient"), options)
+
+      const queuedAt = Date.now()
+      await expect(impatient).rejects.toBeInstanceOf(SessionLifecycleLockError)
+      expect(Date.now() - queuedAt).toBeLessThan(200)
+
+      await holder
+      await patient
+    })
+
+    expect(readSidecar(storeDir).resources[getTranscriptResourceKey(locator("patient"))]).toBeDefined()
+    expect(readSidecar(storeDir).resources[getTranscriptResourceKey(locator("impatient"))]).toBeUndefined()
+  })
+
+  it("hands the queue on when the holder throws", async () => {
+    const sync = durableFileSystem.syncDirectoryDurably
+    let poisoned = false
+    const syncSpy = spyOn(durableFileSystem, "syncDirectoryDurably").mockImplementation(async path => {
+      if (path === storeDir && !poisoned) {
+        poisoned = true
+        await pause(30)
+        throw new Error("sidecar commit failed")
+      }
+      await sync(path)
+    })
+    try {
+      const doomed = prepareFork(locator("doomed"), options)
+      await pause(5)
+      const follower = prepareFork(locator("follower"), options)
+
+      await expect(doomed).rejects.toThrow("sidecar commit failed")
+      await follower
+    } finally {
+      syncSpy.mockRestore()
+    }
+
+    expect(readSidecar(storeDir).resources[getTranscriptResourceKey(locator("follower"))]).toBeDefined()
+  })
   it("never overlaps a second physical deleter with an uncertain first", async () => {
     const target = locator("lease-token")
     let now = 1_000
@@ -905,6 +1002,10 @@ function writeLifecycleRecoveryClaim(
     createdAt: 1,
     incarnation,
   }), { mode: 0o600 })
+}
+
+function pause(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 function locator(sessionId: string, profile = "profile"): TranscriptLocator {
