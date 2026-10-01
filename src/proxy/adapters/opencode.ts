@@ -11,7 +11,7 @@ import { type FileChange, extractFileChangesFromBash } from "../fileChanges"
 import { PRIORITY_ATTESTATION_HEADER, verifyPriorityAttestation } from "../priorityAttestation"
 import { normalizeContent } from "../messages"
 import { extractClientCwd } from "../session/fingerprint"
-import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, MCP_SERVER_NAME, ALLOWED_MCP_TOOLS } from "../tools"
+import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, MCP_SERVER_NAME, ALLOWED_MCP_TOOLS, OPENCODE_CORE_TOOL_NAMES } from "../tools"
 import { buildAgentDefinitionsFromTool, mapModelTier } from "../agentDefs"
 import { fuzzyMatchAgentName } from "../agentMatch"
 import { resolvePassthrough } from "../../env"
@@ -198,8 +198,7 @@ export const openCodeAdapter: AgentAdapter = {
   },
 
   getCoreToolNames(): readonly string[] {
-    // Tools Claude uses on nearly every turn — always loaded, never deferred.
-    return ["read", "write", "edit", "bash", "glob", "grep"]
+    return OPENCODE_CORE_TOOL_NAMES
   },
 
   usesPassthrough(): boolean {

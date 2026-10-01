@@ -1,6 +1,6 @@
 import type { Transform, RequestContext } from "../transform"
 import { extractFileChangesFromBash, type FileChange } from "../fileChanges"
-import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, ALLOWED_MCP_TOOLS } from "../tools"
+import { BLOCKED_BUILTIN_TOOLS, CLAUDE_CODE_ONLY_TOOLS, ALLOWED_MCP_TOOLS, OPENCODE_CORE_TOOL_NAMES } from "../tools"
 import { buildAgentDefinitionsFromTool, mapModelTier } from "../agentDefs"
 import { fuzzyMatchAgentName } from "../agentMatch"
 import { resolvePassthrough } from "../../env"
@@ -22,7 +22,7 @@ export const openCodeTransforms: Transform[] = [
       const blockedTools = BLOCKED_BUILTIN_TOOLS
       const incompatibleTools = CLAUDE_CODE_ONLY_TOOLS
       const allowedMcpTools = ALLOWED_MCP_TOOLS
-      const coreToolNames: readonly string[] = ["read", "write", "edit", "bash", "glob", "grep"]
+      const coreToolNames = OPENCODE_CORE_TOOL_NAMES
 
       // Passthrough mode (env var, default true). Mirrors opencodeAdapter.usesPassthrough().
       const passthrough = resolvePassthrough(true)

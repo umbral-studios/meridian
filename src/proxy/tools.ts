@@ -100,6 +100,12 @@ export function serverToolErrorMessage(types: string[]): string {
 /** MCP server name used by the calling agent */
 export const MCP_SERVER_NAME = "opencode"
 
+/** OpenCode tools used on nearly every turn — always loaded, never deferred */
+export const OPENCODE_CORE_TOOL_NAMES: readonly string[] = [
+  "read", "write", "edit", "bash", "glob", "grep",
+  "task", "task_status", "task_reply", "wait_for_user", "todowrite", "skill",
+]
+
 /** MCP tools that are allowed through the proxy's tool filter */
 export const ALLOWED_MCP_TOOLS = [
   `mcp__${MCP_SERVER_NAME}__read`,
