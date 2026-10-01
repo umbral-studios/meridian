@@ -49,6 +49,12 @@ describe("OpenCode transform parity", () => {
     expect([...ctx.coreToolNames!]).toEqual([...openCodeAdapter.getCoreToolNames!()])
   })
 
+  it("keeps OpenCode orchestration tools core", () => {
+    expect(openCodeAdapter.getCoreToolNames!()).toEqual(
+      expect.arrayContaining(["task", "task_status", "task_reply", "wait_for_user", "todowrite", "skill"]),
+    )
+  })
+
   it("matches supportsThinking", () => {
     const ctx = runTransformHook(openCodeTransforms, "onRequest", makeCtx("opencode"), "opencode")
     expect(ctx.supportsThinking).toBe(openCodeAdapter.supportsThinking!())
