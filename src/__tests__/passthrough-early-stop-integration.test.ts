@@ -3673,4 +3673,94 @@ describe("Integration: passthrough early stop", () => {
     expect(capturedQueryParamsAll[1].options.resume).toBe(initialManagedSessionId())
     expect(capturedQueryParamsAll[1].options.resumeSessionAt).toBe(toolTurn.uuid)
   })
+
+  it("stream: bare-name rejection followed by registered retry at max_turns", async () => {
+    delete process.env.MERIDIAN_PASSTHROUGH_UNCAPTURED_TOOL_RECOVERY
+    const sessionHeader = "es-bare-to-registered"
+    const tools = [
+      { name: "bash", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+      { name: "mcp__oc__bash", input_schema: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+      { name: "mcp__oc__read", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
+      { name: "mcp__oc__edit", input_schema: { type: "object", properties: { filePath: { type: "string" } }, required: ["filePath"] } },
+    ]
+    mockMessages = [assistantMessage([{ type: "text", text: "seed" }])]
+    const seed = await post(app, {
+      model: "claude-sonnet-4-5", max_tokens: 400, stream: false,
+      tools, messages: [{ role: "user", content: "seed" }],
+    }, sessionHeader, { "x-meridian-agent": "pi", "x-session-affinity": sessionHeader })
+    await seed.text()
+    const sourceSessionId = lookupSharedSession(sessionHeader)?.claudeSessionId
+    expect(sourceSessionId).toBeDefined()
+
+    mockMessages = [
+      messageStart("msg_bare_rejected"),
+      toolUseBlockStart(0, "bash", "toolu_bare"),
+      inputJsonDelta(0, '{"command":"ls"}'),
+      blockStop(0),
+      messageDelta("tool_use"),
+      messageStop(),
+      { ...assistantMessage([
+        { type: "tool_use", id: "toolu_bare", name: "bash", input: { command: "ls" } },
+      ]), test_skip_pre_tool_hook: true },
+      unavailableToolMessage("toolu_bare", "bash"),
+      assistantMessage([{ type: "tool_use", id: "toolu_prefixed", name: "mcp__oc__bash", input: { command: "ls" } }]),
+      userDenyMessage("toolu_prefixed"),
+      assistantMessage([{ type: "tool_use", id: "toolu_read", name: "mcp__oc__read", input: { filePath: "/x" } }]),
+      assistantMessage([{ type: "tool_use", id: "toolu_edit", name: "mcp__oc__edit", input: { filePath: "/y" } }]),
+      { type: "result", subtype: "error_max_turns", is_error: true, session_id: "test-session" },
+    ]
+    mockTerminalError = new Error("Claude Code returned an error result: Reached maximum number of turns (8)")
+
+    const res = await post(app, {
+      model: "claude-sonnet-4-5",
+      max_tokens: 400,
+      stream: true,
+      tools,
+      messages: [
+        { role: "user", content: "seed" },
+        { role: "assistant", content: "seed" },
+        { role: "user", content: "call bash and read" },
+      ],
+    }, sessionHeader, { "x-meridian-agent": "pi", "x-session-affinity": sessionHeader, "user-agent": "pi/0.85.0" })
+    expect(res.status).toBe(200)
+    const events = parseSSE(await res.text())
+    expect(events.filter(e => e.event === "error")).toHaveLength(0)
+
+    // Exactly one bash tool_use reaches the client (bare or prefixed)
+    const bashTools = events.flatMap(({ event, data }) => {
+      const block = data.content_block as { type?: string; id?: string; name?: string } | undefined
+      return event === "content_block_start" && block?.type === "tool_use" && block?.name === "bash"
+        ? [block.id] : []
+    })
+    expect(bashTools).toHaveLength(1)
+    expect(["toolu_bare", "toolu_prefixed"]).toContain(bashTools[0]!)
+
+    // No read/edit tool_use reaches the client
+    const otherTools = events.flatMap(({ event, data }) => {
+      const block = data.content_block as { type?: string; name?: string } | undefined
+      return event === "content_block_start" && block?.type === "tool_use" &&
+        (block?.name === "mcp__oc__read" || block?.name === "mcp__oc__edit")
+        ? [block.name] : []
+    })
+    expect(otherTools).toHaveLength(0)
+
+    const terminalReasons = events.flatMap(({ event, data }) => {
+      const delta = data.delta as { stop_reason?: string } | undefined
+      return event === "message_delta" && typeof delta?.stop_reason === "string" ? [delta.stop_reason] : []
+    })
+    expect(terminalReasons).toEqual(["tool_use"])
+    expect(events.filter(e => e.event === "message_stop")).toHaveLength(1)
+    expect(lookupSharedSession(sessionHeader)).toBeUndefined()
+
+    // Follow-up request doesn't resume at the rejected bare-name message
+    mockTerminalError = undefined
+    mockMessages = [assistantMessage([{ type: "text", text: "new response" }])]
+    const followup = await post(app, {
+      model: "claude-sonnet-4-5", max_tokens: 400, stream: false,
+      tools,
+      messages: [{ role: "user", content: "new prompt" }],
+    }, sessionHeader, { "x-meridian-agent": "pi", "x-session-affinity": sessionHeader })
+    await followup.text()
+    expect(capturedQueryParamsAll[2]?.options.resume).toBeUndefined()
+  })
 })
