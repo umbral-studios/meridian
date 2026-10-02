@@ -1006,7 +1006,7 @@ describe("verifyLineage rejects raw dropped blocks without adapter canonicalizat
   })
 })
 
-describe("verifyLineage volatile trailing-block truncation", () => {
+describe("verifyLineage does not infer that a shed trailing block was transient", () => {
   const toolResult = (id: string, content: string) => ({
     type: "tool_result",
     tool_use_id: id,
@@ -1030,22 +1030,6 @@ describe("verifyLineage volatile trailing-block truncation", () => {
     { role: "assistant", content: [{ type: "tool_use", id: "call-a", name: "bash", input: { command: "a" } }] },
     { role: "user", content: [toolResult("call-a", "a-result"), board] },
   ]
-
-  it("continues when the boundary turn sheds its trailing status block", () => {
-    const incoming = [
-      stored[0]!,
-      stored[1]!,
-      { role: "user", content: [toolResult("call-a", "a-result")] },
-      { role: "assistant", content: [{ type: "tool_use", id: "call-b", name: "bash", input: { command: "b" } }] },
-      { role: "user", content: [toolResult("call-b", "b-result"), board] },
-    ]
-
-    expect(verifyLineage(sessionFor(stored), incoming)).toEqual({
-      type: "continuation",
-      session: sessionFor(stored),
-      resumeFrom: 3,
-    })
-  })
 
   it("still diverges when a retained block changed rather than being shed", () => {
     const incoming = [

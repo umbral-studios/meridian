@@ -49,3 +49,52 @@ describe("OpenCode transient hook lineage", () => {
       .toEqual([{ role: "user", content: [before, after] }])
   })
 })
+
+describe("OpenCode background-job board lineage", () => {
+  const toolResult = (id: string, content: string) => ({ type: "tool_result", tool_use_id: id, content })
+  const toolUse = (id: string, command: string) => ({ type: "tool_use", id, name: "bash", input: { command } })
+  const board = text("<system-reminder>\n### Background Job Board\nSENTINEL: background-job-board-v2\n</system-reminder>")
+  const stateOf = (messages: ReturnType<typeof canonicalize>): SessionState => ({
+    claudeSessionId: "source", lastAccess: 0, messageCount: messages.length,
+    lineageHash: computeLineageHash(messages), messageHashes: computeMessageHashes(messages),
+    messageBlockHashes: computeMessageBlockHashes(messages),
+  })
+
+  const stored = [
+    { role: "user", content: [text("start")] },
+    { role: "assistant", content: [toolUse("call-a", "a")] },
+    { role: "user", content: [toolResult("call-a", "a-result"), board] },
+  ]
+
+  it("continues when the boundary turn sheds its trailing board", () => {
+    const incoming = [
+      stored[0]!,
+      stored[1]!,
+      { role: "user", content: [toolResult("call-a", "a-result")] },
+      { role: "assistant", content: [toolUse("call-b", "b")] },
+      { role: "user", content: [toolResult("call-b", "b-result"), board] },
+    ]
+    expect(verifyLineage(stateOf(canonicalize(stored)), canonicalize(incoming)))
+      .toMatchObject({ type: "continuation", resumeFrom: 3 })
+  })
+
+  it("still diverges when a retained block changed rather than being shed", () => {
+    const incoming = [
+      stored[0]!,
+      stored[1]!,
+      { role: "user", content: [toolResult("call-a", "revised-result")] },
+      { role: "assistant", content: "next" },
+    ]
+    expect(verifyLineage(stateOf(canonicalize(stored)), canonicalize(incoming)).type).toBe("diverged")
+  })
+
+  it("still diverges when the boundary turn is emptied entirely", () => {
+    const incoming = [stored[0]!, stored[1]!, { role: "user", content: [] }, { role: "assistant", content: "next" }]
+    expect(verifyLineage(stateOf(canonicalize(stored)), canonicalize(incoming)).type).toBe("diverged")
+  })
+
+  it("retains a board-shaped text block that is not a Background Job Board reminder", () => {
+    const messages = [{ role: "user", content: [text("### Background Job Board"), text("ALPHA")] }]
+    expect(canonicalize(messages)).toEqual(messages)
+  })
+})

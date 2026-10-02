@@ -61,13 +61,26 @@ function isTransientUserPromptHook(block: unknown): boolean {
   })
 }
 
+/**
+ * NOTE: OpenCode-specific. The background-job board plugin attaches its status
+ * block to whichever user turn is currently last and moves it to the new last
+ * turn on the next request, so the stored turn "sheds" it. It is request-scoped
+ * status, not conversation content.
+ */
+function isTransientBackgroundJobBoard(block: unknown): boolean {
+  if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") return false
+  return /^\s*<system-reminder>\s*#{1,6}\s*Background Job Board\b[\s\S]*<\/system-reminder>\s*$/.test(block.text)
+}
+
 export function canonicalizeOpenCodeMessagesForLineage(
   messages: Array<{ role: string; content: unknown }>,
 ): Array<{ role: string; content: unknown }> {
   // Preserve message positions exactly; only block content may be filtered.
   return messages.map((message) => {
     if (message.role !== "user" || !Array.isArray(message.content)) return message
-    const content = message.content.filter((block) => !isTransientUserPromptHook(block))
+    const content = message.content.filter(
+      (block) => !isTransientUserPromptHook(block) && !isTransientBackgroundJobBoard(block),
+    )
     // A hook-only message has no durable identity. Retain it rather than
     // collapsing distinct requests to the same empty hash.
     if (content.length === 0 || content.length === message.content.length) return message
